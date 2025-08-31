@@ -1,6 +1,5 @@
 from django.db import models
 
-
 class Region(models.Model):
     """
     Represents a geographical region containing multiple countries.
@@ -31,11 +30,15 @@ class Country(models.Model):
         on_delete=models.CASCADE,
         related_name="countries",
     )
+    topLevelDomain = models.TextField(default="[]",null=False)  # Store JSON as text
+    capital = models.CharField(max_length=100, blank=True, null=True)
 
     class Meta:
         indexes = [
             models.Index(fields=["region"], name="country_region_idx"),
             models.Index(fields=["population"], name="country_population_idx"),
+            models.Index(fields=["capital"], name="country_capital_idx"),
+
         ]
         ordering = ["name"]
         verbose_name = "Country"
