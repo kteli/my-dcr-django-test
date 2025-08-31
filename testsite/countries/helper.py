@@ -1,6 +1,11 @@
 from django.core.paginator import Paginator, EmptyPage, PageNotAnInteger
 
+
 def paginate_queryset(queryset, page, per_page):
+    """
+    Robust pagination helper that never raises to the caller.
+    Clamps out-of-range pages to the last page and non-integers to page 1.
+    """
     paginator = Paginator(queryset, per_page)
     try:
         return paginator.page(page)
@@ -8,6 +13,7 @@ def paginate_queryset(queryset, page, per_page):
         return paginator.page(1)
     except EmptyPage:
         return paginator.page(paginator.num_pages)
+
 
 def page_meta(page_obj):
     """

@@ -1,35 +1,43 @@
 from typing import Dict, Any
-import logging, json
-
+import json, logging
 from countries.validators import CountryRowForm
 
 logger = logging.getLogger(__name__)
 
 class CountryDataValidationError(Exception):
-    """Custom exception for country data validation errors."""
+    """Raised when a country data row fails validation."""
     pass
 
+
 class DataValidator:
-    """Service for validating and transforming country data rows."""
+    """
+    Validates and normalizes raw country rows coming from the remote JSON.
+    Ensures types and formats are consistent with models and downstream code.
+    """
+
+    REQUIRED_KEYS = {"name", "region", "alpha2Code", "alpha3Code", "population"}
 
     @staticmethod
     def validate_row(row: Dict[str, Any], index: int) -> Dict[str, Any]:
-        """Validate and cast a single row of country data.
-
-        Args:
-            row: Dictionary containing raw country data.
-            index: Row index for error reporting.
-
-        Returns:
-            Validated and cleaned data dictionary.
-
-        Raises:
-            CountryDataValidationError: If the row fails validation.
         """
-        required_keys = {"name", "region", "alpha2Code", "alpha3Code", "population", "capital"}
-        if not all(key in row for key in required_keys):
-            raise CountryDataValidationError(f"Row {index} missing required keys: {required_keys - set(row)}")
+        Validate a single row and return cleaned data.
 
+        - Ensures required keys are present.
+        - Uses CountryRowForm for field-level validation & normalization.
+        - Normalizes topLevelDomain to a compact JSON string.
+        - Normalizes empty capital -> None.
+
+        Returns a dict with keys:
+          name, region, alpha2Code, alpha3Code, population,
+          topLevelDomain (JSON string), capital (str or None)
+        """
+        missing = DataValidator.REQUIRED_KEYS - set(row.keys())
+        if missing:
+            raise CountryDataValidationError(
+                f"Row {index} missing required keys: {sorted(missing)}"
+            )
+
+        # Accept absent topLevelDomain/capital gracefully
         form_data = {
             "name": row.get("name", ""),
             "region": row.get("region", ""),
@@ -42,6 +50,23 @@ class DataValidator:
 
         form = CountryRowForm(data=form_data)
         if not form.is_valid():
-            raise CountryDataValidationError(f"Row {index} invalid: {form.errors.as_json()}")
+            # Log the form errors for observability and raise a concise exception
+            logger.debug("Row %s form errors: %s", index, form.errors.as_json())
+            raise CountryDataValidationError(
+                f"Row {index} invalid: {form.errors.as_json()}"
+            )
 
-        return form.cleaned_data
+        cleaned = form.cleaned_data
+
+        # Ensure final shapes/types are exactly what the model expects
+        # - topLevelDomain must be a JSON string (already ensured by clean_topLevelDomain)
+        # - capital should be None or a non-empty string (clean_capital handles this)
+        return {
+            "name": cleaned["name"],
+            "region": cleaned["region"],
+            "alpha2Code": cleaned["alpha2Code"],
+            "alpha3Code": cleaned["alpha3Code"],
+            "population": cleaned["population"],
+            "topLevelDomain": cleaned["topLevelDomain"],  # JSON string
+            "capital": cleaned.get("capital"),            # None or str
+        }

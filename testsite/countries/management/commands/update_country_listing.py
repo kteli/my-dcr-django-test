@@ -1,11 +1,12 @@
 from typing import List, Dict, Any, Tuple
 import contextlib
 import logging
-from requests.exceptions import RequestException
-from tqdm import tqdm
+
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
+from django.core.exceptions import ValidationError
 
+from tqdm import tqdm
 
 from countries.services.api_client import APIClient
 from countries.services.data_validator import DataValidator, CountryDataValidationError
@@ -14,53 +15,67 @@ from countries.models import Country
 
 logger = logging.getLogger(__name__)
 
-class Command(BaseCommand):
-    """Loads country data from a remote JSON file with all-or-nothing consistency.
 
-    Options:
-        --batch-size: Number of records to process per batch (default: 1000).
-        --dry-run: Simulate the import without making database changes.
-        --reset: Clear the database before importing.
-        --save-response: Save API response to api_response.json for debugging.
+class Command(BaseCommand):
     """
+    Import/refresh country data from the remote JSON endpoint.
+
+    Examples:
+      python manage.py update_country_listing
+      python manage.py update_country_listing --dry-run
+      python manage.py update_country_listing --reset
+      python manage.py update_country_listing --batch-size=500 --no-progress
+      python manage.py update_country_listing --save-response
+    """
+
     def add_arguments(self, parser):
-        """Add command-line arguments."""
         parser.add_argument(
             "--batch-size",
             type=int,
             default=1000,
-            help="Batch size for database operations (must be positive)",
+            help="Batch size for bulk_create/bulk_update (must be positive)",
         )
         parser.add_argument(
             "--dry-run",
             action="store_true",
-            help="Simulate import without database changes",
+            help="Simulate the import without writing to the database",
         )
         parser.add_argument(
             "--reset",
             action="store_true",
-            help="Clear database before import",
+            help="Delete all existing data before importing",
         )
         parser.add_argument(
             "--save-response",
             action="store_true",
-            help="Save API response to api_response.json",
+            help="Save fetched API JSON to api_response.json for debugging",
+        )
+        parser.add_argument(
+            "--no-progress",
+            action="store_true",
+            help="Disable progress bar output (CI-friendly)",
         )
 
-    def process_records(self, data: List[Dict[str, Any]], batch_size: int, dry_run: bool, reset: bool) -> Tuple[int, int, int]:
-        """Process country data records and update the database.
-
-        Args:
-            data: List of country data dictionaries.
-            batch_size: Maximum batch size for database operations.
-            dry_run: If True, simulate operations.
-            reset: If True, clear the database before processing.
-
-        Returns:
-            Tuple of (created, updated, skipped) counts.
+    # -----------------------------
+    # core processing
+    # -----------------------------
+    def process_records(
+        self,
+        data: List[Dict[str, Any]],
+        batch_size: int,
+        dry_run: bool,
+        reset: bool,
+        show_progress: bool,
+    ) -> Tuple[int, int, int]:
         """
-        created_count, updated_count, skipped_count = 0, 0, 0
+        Validate rows and compute create/update changesets.
+        Applies writes in chunks to avoid large memory spikes.
 
+        Returns: (created_count, updated_count, skipped_count)
+        """
+        created_count = updated_count = skipped_count = 0
+
+        # Optional destructive reset
         if reset:
             self.stdout.write(self.style.WARNING("Resetting database..."))
             if not dry_run:
@@ -68,102 +83,152 @@ class Command(BaseCommand):
             else:
                 self.stdout.write("[Dry Run] Would reset database")
 
-        existing_countries = DatabaseManager.get_existing_countries()
-        existing_regions = DatabaseManager.get_existing_regions()
-        to_create, to_update = [], []
+        # Preload caches to avoid N+1
+        regions_by_name = DatabaseManager.preload_regions_by_name()
+        countries_by_name = DatabaseManager.preload_countries_by_name()
 
-        for idx, row in tqdm(enumerate(data), total=len(data), desc="Processing rows"):
+        to_create: List[Country] = []
+        to_update: List[Country] = []
+
+        iterable = enumerate(data)
+        if not show_progress:
+            iterator = iterable
+        else:
+            iterator = tqdm(iterable, total=len(data), desc="Processing rows")
+
+        for idx, row in iterator:
+            # Validate/normalize a single row
             try:
-                validated_row = DataValidator.validate_row(row, idx)
+                cleaned = DataValidator.validate_row(row, idx)
             except CountryDataValidationError as e:
                 logger.warning(str(e))
+                skipped_count += 1
                 continue
 
-            region = DatabaseManager.get_or_create_region(validated_row["region"], existing_regions, dry_run)
+            # Region instance from cache (created if needed)
+            region = DatabaseManager.get_or_create_region(
+                cleaned["region"], regions_by_name, dry_run=dry_run
+            )
 
-            country_data = {
-                "name": validated_row["name"],
-                "alpha2Code": validated_row["alpha2Code"],
-                "alpha3Code": validated_row["alpha3Code"],
-                "population": validated_row["population"],
-                "topLevelDomain": validated_row["topLevelDomain"],
-                "capital": validated_row["capital"],
+            # Prepare dict for model comparison
+            desired = {
+                "name": cleaned["name"],
+                "alpha2Code": cleaned["alpha2Code"],
+                "alpha3Code": cleaned["alpha3Code"],
+                "population": cleaned["population"],
+                "topLevelDomain": cleaned["topLevelDomain"],  # JSON string
+                "capital": cleaned.get("capital"),
                 "region": region,
             }
 
-            country = Country(**country_data)
-            try:
-                country.full_clean()
-            except ValidationError as e:
-                logger.warning(f"Validation failed for {country.name}: {e}")
-                continue
+            existing = countries_by_name.get(desired["name"])
 
-            if country.name not in existing_countries:
+            if existing is None:
+                # New country
+                country = Country(**desired)
+                # If you rely solely on form validation, you can skip full_clean()
+                try:
+                    country.full_clean()
+                except ValidationError as e:
+                    logger.warning("Validation failed for %s: %s", desired["name"], e)
+                    skipped_count += 1
+                    continue
                 to_create.append(country)
+                countries_by_name[desired["name"]] = country  # keep cache consistent
                 created_count += 1
-                self.stdout.write(f"🟢 Create: {country.name}")
+                # Flush in batches
+                if len(to_create) >= batch_size:
+                    created_count += DatabaseManager.bulk_create_countries(
+                        to_create, dry_run=dry_run, batch_size=batch_size
+                    ) - len(to_create)
+                    to_create.clear()
             else:
-                existing = Country.objects.get(name=country.name)
-                if any(getattr(existing, k) != v for k, v in country_data.items() if k != "region"):
-                    for key, val in country_data.items():
-                        setattr(existing, key, val)
+                # Compare and update in-memory; mark for bulk_update if changed
+                changed = False
+                for field in (
+                    "alpha2Code",
+                    "alpha3Code",
+                    "population",
+                    "topLevelDomain",
+                    "capital",
+                    "region",
+                ):
+                    new_val = desired[field]
+                    if getattr(existing, field) != new_val:
+                        setattr(existing, field, new_val)
+                        changed = True
+                if changed:
                     to_update.append(existing)
                     updated_count += 1
-                    self.stdout.write(f"🟡 Update: {country.name}")
+                    if len(to_update) >= batch_size:
+                        updated_count += DatabaseManager.bulk_update_countries(
+                            to_update, dry_run=dry_run, batch_size=batch_size
+                        ) - len(to_update)
+                        to_update.clear()
                 else:
                     skipped_count += 1
-                    self.stdout.write(f"⚪ Skipped: {country.name}")
 
-            if len(to_create) >= batch_size or len(to_update) >= batch_size:
-                created_count += DatabaseManager.bulk_create_countries(to_create, dry_run)
-                updated_count += DatabaseManager.bulk_update_countries(to_update, dry_run)
-                to_create.clear()
-                to_update.clear()
+        # Flush tail batches
+        if to_create:
+            created_count += DatabaseManager.bulk_create_countries(
+                to_create, dry_run=dry_run, batch_size=batch_size
+            ) - len(to_create)
+            to_create.clear()
 
-        # Flush remaining records
-        created_count += DatabaseManager.bulk_create_countries(to_create, dry_run)
-        updated_count += DatabaseManager.bulk_update_countries(to_update, dry_run)
+        if to_update:
+            updated_count += DatabaseManager.bulk_update_countries(
+                to_update, dry_run=dry_run, batch_size=batch_size
+            ) - len(to_update)
+            to_update.clear()
 
         return created_count, updated_count, skipped_count
 
+    # -----------------------------
+    # command entrypoint
+    # -----------------------------
     def handle(self, *args, **options):
-        """Execute the command to import country data.
-
-        Args:
-            options: Command-line options (batch_size, dry_run, reset, save_response).
-
-        Raises:
-            CommandError: If an error occurs during execution.
-        """
         batch_size = options["batch_size"]
+        dry_run = options["dry_run"]
+        reset = options["reset"]
+        save_response = options["save_response"]
+        show_progress = not options["no_progress"]
+
         if batch_size <= 0:
             raise CommandError("Batch size must be a positive integer")
 
-        try:
-            logger.info(f"Starting import with batch_size={batch_size}, dry_run={options['dry_run']}, reset={options['reset']}")
-            api_client = APIClient()
-            data = api_client.fetch_data(save_response=options["save_response"])
+        logger.info(
+            "Starting import: batch_size=%s dry_run=%s reset=%s",
+            batch_size, dry_run, reset
+        )
 
-            with transaction.atomic() if not options["dry_run"] else contextlib.suppress():
+        # Fetch
+        api = APIClient()
+        data = api.fetch_data(save_response=save_response)
+
+        # Apply in a single transaction unless dry-run
+        ctx = transaction.atomic() if not dry_run else contextlib.suppress()
+        try:
+            with ctx:
                 created, updated, skipped = self.process_records(
                     data,
                     batch_size=batch_size,
-                    dry_run=options["dry_run"],
-                    reset=options["reset"],
+                    dry_run=dry_run,
+                    reset=reset,
+                    show_progress=show_progress,
                 )
-                if options["dry_run"]:
-                    self.stdout.write("[Dry Run] No changes committed")
+                if dry_run:
+                    self.stdout.write(self.style.WARNING("[Dry Run] No changes committed"))
                     return
 
             self.stdout.write(
                 self.style.SUCCESS(
-                    f"🎉 Import completed successfully. Summary: Created {created}, Updated {updated}, Skipped {skipped}"
+                    f"🎉 Import completed. Created: {created}, Updated: {updated}, Skipped: {skipped}"
                 )
             )
-        except (CountryDataValidationError, ValueError, RequestException) as e:
+        except (CountryDataValidationError, ValueError) as e:
             self.stderr.write(self.style.ERROR(str(e)))
             raise CommandError(str(e))
         except Exception as e:
-            logger.error("Unexpected error during import", exc_info=True)
+            logger.exception("Unexpected error during import")
             self.stderr.write(self.style.ERROR(f"Unexpected error: {e}"))
-            raise
+            raise CommandError(str(e))
