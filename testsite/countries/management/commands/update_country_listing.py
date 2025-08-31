@@ -1,6 +1,6 @@
 from typing import List, Dict, Any, Tuple
-import contextlib
-import logging
+import contextlib,logging
+from django.core.cache import cache
 
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
@@ -219,6 +219,9 @@ class Command(BaseCommand):
                 if dry_run:
                     self.stdout.write(self.style.WARNING("[Dry Run] No changes committed"))
                     return
+            # ✅ Clear cache after successful import (not dry-run)
+            cache.clear()
+            logger.info("Cache cleared after country import")
 
             self.stdout.write(
                 self.style.SUCCESS(
