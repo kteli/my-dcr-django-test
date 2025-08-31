@@ -80,6 +80,8 @@ This Django application manages country and region data, providing a management 
   - Supported `--dry-run` to simulate imports without committing changes.
 - **Testability**:
   - Structured services for easy unit testing with Django’s `TestCase` and mocking libraries.
+- **Caching**:
+  - added caching at view level
 
 
 ## Installation
