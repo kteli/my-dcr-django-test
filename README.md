@@ -101,22 +101,24 @@ Follow these steps to set up the Django application for importing country data a
    Clone the project repository to your local machine:
    ```bash
    git clone <https://github.com/kteli/my-dcr-django-test.git>
-   cd testsite
     ```
 
 2. **Set Up a Virtual Environment (recommended)**:
 Create and activate a virtual environment to manage dependencies:
 
 ```bash
-python -m venv dcr-django-test-env
+python3 -m venv dcr-django-test-env
 source dcr-django-test-env/bin/activate  # On Windows: dcr-django-test-env\Scripts\activate
+
+cd testsite
 ```
 
 3. **Install Dependencies:**
-Install the required Python packages using pip:
+Install the required  packages using pip:
 
 ```bash
-pip install requests tenacity tqdm
+    pip install -r requirements.txt
+
 ```
 
 4. **Apply Database Migrations:**
