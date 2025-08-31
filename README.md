@@ -109,8 +109,6 @@ Create and activate a virtual environment to manage dependencies:
 ```bash
 python3 -m venv dcr-django-test-env
 source dcr-django-test-env/bin/activate  # On Windows: dcr-django-test-env\Scripts\activate
-
-cd testsite
 ```
 
 3. **Install Dependencies:**
@@ -118,7 +116,8 @@ Install the required  packages using pip:
 
 ```bash
     pip install -r requirements.txt
-
+    
+    cd testsite 
 ```
 
 4. **Apply Database Migrations:**
