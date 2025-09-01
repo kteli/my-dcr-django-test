@@ -133,8 +133,19 @@ python manage.py migrate
 # Test the Setup:
 Run the Django development server to verify the setup:
 
+## Running Tests
+
+This project includes a full test suite for the `countries` app, covering:
+
+- `/countries/stats/` API endpoint
+- Data validation (`DataValidator`, `CountryRowForm`)
+- Management command `update_country_listing`
+
+
+### Run all tests
+
 ```bash
-python manage.py runserver
+python manage.py test -v 2
 ```
 
 ## Import Command Options
