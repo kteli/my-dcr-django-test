@@ -15,7 +15,7 @@ This Django application manages country and region data, providing a management 
   - Returns a compact JSON response with execution time for performance monitoring.
 - **Service Layer**:
   - The `get_region_stats` service in `countries/services/region_stats.py` uses Django's ORM with:
-    - `prefetch_related("countries")` to optimize queries by fetching related countries in a single query.
+  
     - `Count("countries")` and `Sum("countries__population")` annotations for efficient aggregation.
     - Validation of the `name_filter` parameter to ensure safe filtering.
   - Returns a clean dictionary for JSON serialization.
@@ -139,6 +139,12 @@ python manage.py runserver
 
 ## Import Command Options
 
+    - python manage.py update_country_listing
+    - python manage.py update_country_listing --dry-run
+    - python manage.py update_country_listing --reset
+    - python manage.py update_country_listing --batch-size=500 --no-progress
+    - python manage.py update_country_listing --save-response
+
 The `update_country_listing` management command supports several optional flags to customize its behavior. These options enhance flexibility, debugging, and performance tuning.
 
 - **`--batch-size <number>`**:
@@ -180,3 +186,4 @@ You can combine these options for specific use cases. For example, to test a low
 ```bash
 python manage.py update_country_listing --batch-size 200 --dry-run --reset --save-response
 ```
+
